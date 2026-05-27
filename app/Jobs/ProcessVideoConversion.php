@@ -5,10 +5,6 @@ namespace App\Jobs;
 use App\Models\ConversionJob;
 use App\Services\CallbackService;
 use App\Services\R2StorageService;
-use FFMpeg\Coordinate\Dimension;
-use FFMpeg\FFMpeg;
-use FFMpeg\Filters\Video\ResizeFilter;
-use FFMpeg\Format\Video\X264;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -26,11 +22,10 @@ class ProcessVideoConversion implements ShouldQueue
     public int $tries = 2;
     public int $backoff = 60;
 
-    // Watermark is always HD, positioned bottom-right, 25% of video width, 50% opacity
     private const WATERMARK_IMAGE    = 'watermark-image.png';
-    private const WATERMARK_WIDTH_PC = 0.25;
-    private const WATERMARK_OPACITY  = 0.5;
-    private const WATERMARK_PADDING  = 20;
+    private const WATERMARK_WIDTH_PC = 0.25;  // 25% of the video width
+    private const WATERMARK_OPACITY  = 0.5;   // 50%
+    private const WATERMARK_PADDING  = 20;    // px from edge
 
     public function __construct(private readonly int $conversionJobId) {}
 
@@ -67,7 +62,7 @@ class ProcessVideoConversion implements ShouldQueue
         $callback->notify($job);
     }
 
-    // -------------------------------------------------------------------------
+    // ── Handlers ─────────────────────────────────────────────────────────────
 
     private function handleConversion(ConversionJob $job, R2StorageService $r2, $tempDir, string $sourceFile): string
     {
@@ -108,41 +103,54 @@ class ProcessVideoConversion implements ShouldQueue
         return $outputR2Path;
     }
 
-    // -------------------------------------------------------------------------
+    // ── FFmpeg ────────────────────────────────────────────────────────────────
 
     private function convert(string $input, string $output, string $targetQuality): void
     {
-        [$width, $height, $kilobitrate] = $this->resolutionSettings($targetQuality);
+        [$shortSide, $kilobitrate] = $this->resolutionSettings($targetQuality);
 
-        $video = $this->makeFfmpeg()->open($input);
+        // Orientation-aware scale:
+        //   Portrait  (iw < ih) → width = shortSide, height = auto (-2)
+        //   Landscape (iw >= ih)→ width = auto (-2),  height = shortSide
+        // -2 keeps the dimension divisible by 2 (required by x264)
+        $scale = "scale='if(lt(iw,ih),{$shortSide},-2)':'if(lt(iw,ih),-2,{$shortSide})'";
 
-        $video->filters()
-            ->resize(new Dimension($width, $height), ResizeFilter::RESIZEMODE_FIT)
-            ->synchronize();
+        $command = [
+            config('laravel-ffmpeg.ffmpeg.binaries', 'ffmpeg'),
+            '-y',
+            '-i', $input,
+            '-vf', $scale,
+            '-vcodec', 'libx264',
+            '-b:v', $kilobitrate . 'k',
+            '-acodec', 'aac',
+            '-b:a', '192k',
+            '-threads', (string) config('laravel-ffmpeg.ffmpeg.threads', 4),
+            $output,
+        ];
 
-        $video->save($this->makeFormat($kilobitrate), $output);
+        $this->runProcess($command, 'Conversion');
     }
 
     private function convertWithWatermark(string $input, string $output, string $watermarkFile): void
     {
-        [$width, $height, $kilobitrate] = $this->resolutionSettings('HD');
+        [$shortSide, $kilobitrate] = $this->resolutionSettings('HD');
 
-        // Watermark width = 25% of video width; must be even for x264
-        $wmWidth = (int) round($width * self::WATERMARK_WIDTH_PC);
-        if ($wmWidth % 2 !== 0) {
-            $wmWidth++;
-        }
+        // Same orientation-aware scale for the main video
+        $baseScale = "scale='if(lt(iw,ih),{$shortSide},-2)':'if(lt(iw,ih),-2,{$shortSide})',setsar=1";
 
         $filterComplex = implode(';', [
-            // Scale + letterbox the source to HD
-            "[0:v]scale={$width}:{$height}:force_original_aspect_ratio=decrease," .
-            "pad={$width}:{$height}:(ow-iw)/2:(oh-ih)/2[base]",
+            // Scale main video preserving orientation + aspect ratio
+            "[0:v]{$baseScale}[base]",
 
-            // Scale watermark to target width, convert to RGBA, apply 50% opacity
-            "[1:v]scale={$wmWidth}:-2,format=rgba,colorchannelmixer=aa=" . self::WATERMARK_OPACITY . "[wm]",
+            // Scale watermark to 25% of the actual video width using scale2ref
+            // main_w = width of [base] after scaling (correct for both portrait & landscape)
+            "[1:v][base]scale2ref='trunc(main_w*" . self::WATERMARK_WIDTH_PC . "/2)*2':-1[wm_raw][base_ref]",
 
-            // Overlay watermark bottom-right with padding
-            "[base][wm]overlay=W-w-" . self::WATERMARK_PADDING . ":H-h-" . self::WATERMARK_PADDING,
+            // Apply 50% opacity
+            "[wm_raw]format=rgba,colorchannelmixer=aa=" . self::WATERMARK_OPACITY . "[wm]",
+
+            // Overlay bottom-right corner
+            "[base_ref][wm]overlay=W-w-" . self::WATERMARK_PADDING . ":H-h-" . self::WATERMARK_PADDING,
         ]);
 
         $command = [
@@ -159,39 +167,36 @@ class ProcessVideoConversion implements ShouldQueue
             $output,
         ];
 
+        $this->runProcess($command, 'Watermark conversion');
+    }
+
+    private function runProcess(array $command, string $label): void
+    {
         $process = new Process($command);
         $process->setTimeout(config('laravel-ffmpeg.timeout', 3600));
         $process->run();
 
         if (!$process->isSuccessful()) {
             throw new \RuntimeException(
-                'FFmpeg watermark failed: ' . $process->getErrorOutput()
+                "{$label} failed: " . $process->getErrorOutput()
             );
         }
     }
 
-    // -------------------------------------------------------------------------
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private function makeFfmpeg(): FFMpeg
-    {
-        return FFMpeg::create([
-            'ffmpeg.binaries'  => config('laravel-ffmpeg.ffmpeg.binaries', 'ffmpeg'),
-            'ffprobe.binaries' => config('laravel-ffmpeg.ffprobe.binaries', 'ffprobe'),
-            'timeout'          => config('laravel-ffmpeg.timeout', 3600),
-            'ffmpeg.threads'   => config('laravel-ffmpeg.ffmpeg.threads', 4),
-        ]);
-    }
-
-    private function makeFormat(int $kilobitrate): X264
-    {
-        return (new X264())->setKiloBitrate($kilobitrate)->setAudioKiloBitrate(192);
-    }
-
+    /**
+     * Returns [shortSide, kilobitrate].
+     * shortSide is the pixel count for the SHORTER dimension of the video,
+     * which makes it orientation-independent:
+     *   HD   → short side 1080 → landscape 1920×1080 / portrait 1080×1920
+     *   4K   → short side 2160 → landscape 3840×2160 / portrait 2160×3840
+     */
     private function resolutionSettings(string $quality): array
     {
         return match (strtoupper($quality)) {
-            '4K'    => [3840, 2160, 20000],
-            'HD'    => [1920, 1080, 8000],
+            '4K'    => [2160, 20000],
+            'HD'    => [1080, 8000],
             default => throw new \InvalidArgumentException("Unsupported target quality: {$quality}"),
         };
     }
