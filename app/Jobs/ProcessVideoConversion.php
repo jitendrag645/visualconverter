@@ -23,9 +23,9 @@ class ProcessVideoConversion implements ShouldQueue
     public int $backoff = 60;
 
     private const WATERMARK_IMAGE    = 'watermark-image.png';
-    private const WATERMARK_WIDTH_PC = 0.25;  // 25% of the video width
+    private const WATERMARK_WIDTH_PC = 0.35;  // 35% of the video width
     private const WATERMARK_OPACITY  = 0.5;   // 50%
-    private const WATERMARK_PADDING  = 20;    // px from edge
+    private const WATERMARK_PADDING  = 20;    // px from right edge
 
     public function __construct(private readonly int $conversionJobId) {}
 
@@ -142,15 +142,16 @@ class ProcessVideoConversion implements ShouldQueue
             // Scale main video preserving orientation + aspect ratio
             "[0:v]{$baseScale}[base]",
 
-            // Scale watermark to 25% of the actual video width using scale2ref
+            // Scale watermark to 35% of the actual video width using scale2ref
             // main_w = width of [base] after scaling (correct for both portrait & landscape)
-            "[1:v][base]scale2ref='trunc(main_w*" . self::WATERMARK_WIDTH_PC . "/2)*2':-1[wm_raw][base_ref]",
+            // -2 keeps height even (required by x264) while preserving aspect ratio
+            "[1:v][base]scale2ref='trunc(main_w*" . self::WATERMARK_WIDTH_PC . "/2)*2':-2[wm_scaled][base_ref]",
 
-            // Apply 50% opacity
-            "[wm_raw]format=rgba,colorchannelmixer=aa=" . self::WATERMARK_OPACITY . "[wm]",
+            // Normalize SAR to 1:1 to prevent vertical/horizontal stretching, then apply opacity
+            "[wm_scaled]setsar=1,format=rgba,colorchannelmixer=aa=" . self::WATERMARK_OPACITY . "[wm]",
 
-            // Overlay bottom-right corner
-            "[base_ref][wm]overlay=W-w-" . self::WATERMARK_PADDING . ":H-h-" . self::WATERMARK_PADDING,
+            // Overlay right-aligned, vertically centered
+            "[base_ref][wm]overlay=W-w-" . self::WATERMARK_PADDING . ":(H-h)/2",
         ]);
 
         $command = [
