@@ -23,9 +23,9 @@ class ProcessVideoConversion implements ShouldQueue
     public int $backoff = 60;
 
     private const WATERMARK_IMAGE    = 'watermark-image.png';
-    private const WATERMARK_WIDTH_PC = 0.35;  // 35% of the video width
+    private const WATERMARK_WIDTH_PC = 0.55;  // 55% of the video width
     private const WATERMARK_OPACITY  = 0.5;   // 50%
-    private const WATERMARK_PADDING  = 20;    // px from right edge
+    private const WATERMARK_PADDING  = 20;    // px from right edge (unused when centered)
 
     public function __construct(private readonly int $conversionJobId) {}
 
@@ -150,8 +150,8 @@ class ProcessVideoConversion implements ShouldQueue
             // Normalize SAR to 1:1 to prevent vertical/horizontal stretching, then apply opacity
             "[wm_scaled]setsar=1,format=rgba,colorchannelmixer=aa=" . self::WATERMARK_OPACITY . "[wm]",
 
-            // Overlay right-aligned, vertically centered
-            "[base_ref][wm]overlay=W-w-" . self::WATERMARK_PADDING . ":(H-h)/2",
+            // Overlay fully centered (horizontal + vertical)
+            "[base_ref][wm]overlay=(W-w)/2:(H-h)/2",
         ]);
 
         $command = [
