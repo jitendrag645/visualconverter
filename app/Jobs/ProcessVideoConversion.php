@@ -23,7 +23,7 @@ class ProcessVideoConversion implements ShouldQueue
     public int $backoff = 60;
 
     private const WATERMARK_IMAGE    = 'watermark-image.png';
-    private const WATERMARK_WIDTH_PC = 0.55;  // 55% of the video width
+    private const WATERMARK_WIDTH_PC = 0.75;  // 75% of the video width
     private const WATERMARK_OPACITY  = 0.5;   // 50%
     private const WATERMARK_PADDING  = 20;    // px from right edge (unused when centered)
 
