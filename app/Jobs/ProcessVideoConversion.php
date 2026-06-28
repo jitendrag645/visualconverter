@@ -204,10 +204,9 @@ class ProcessVideoConversion implements ShouldQueue
 
     private function buildOutputFilename(ConversionJob $job): string
     {
-        $ext    = pathinfo($job->source_r2_path, PATHINFO_EXTENSION) ?: 'mp4';
         $base   = pathinfo($job->source_r2_path, PATHINFO_FILENAME);
         $suffix = $job->isWatermark() ? 'WATERMARK' : strtoupper($job->target_quality);
-        return "{$base}_{$suffix}.{$ext}";
+        return "{$base}_{$suffix}.mp4";
     }
 
     public function failed(\Throwable $exception): void
