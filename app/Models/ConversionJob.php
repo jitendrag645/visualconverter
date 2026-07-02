@@ -19,6 +19,9 @@ class ConversionJob extends Model
         'watermark_path',
         'watermark_folder',
         'output_r2_path',
+        'output_width',
+        'output_height',
+        'output_codec',
         'status',
         'error_message',
         'progress',
@@ -57,13 +60,16 @@ class ConversionJob extends Model
         $this->update(['status' => self::STATUS_PROCESSING, 'started_at' => now()]);
     }
 
-    public function markCompleted(string $outputPath): void
+    public function markCompleted(string $outputPath, ?int $width = null, ?int $height = null, ?string $codec = null): void
     {
         $this->update([
-            'status' => self::STATUS_COMPLETED,
+            'status'         => self::STATUS_COMPLETED,
             'output_r2_path' => $outputPath,
-            'progress' => 100,
-            'completed_at' => now(),
+            'output_width'   => $width,
+            'output_height'  => $height,
+            'output_codec'   => $codec,
+            'progress'       => 100,
+            'completed_at'   => now(),
         ]);
     }
 

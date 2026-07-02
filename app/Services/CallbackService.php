@@ -20,6 +20,9 @@ class CallbackService
             'output_r2_path'      => $job->output_r2_path,
             'output_public_url'   => $this->buildPublicUrl($job),
             'destination_folder'  => $job->destination_folder,
+            'output_width'        => $job->output_width,
+            'output_height'       => $job->output_height,
+            'output_codec'        => $job->output_codec,
             'status'              => $job->status,
             'completed_at'        => $job->completed_at?->toISOString(),
         ];

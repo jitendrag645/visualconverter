@@ -46,11 +46,11 @@ class ProcessVideoConversion implements ShouldQueue
             Log::info('Downloading source from R2', ['uuid' => $job->uuid, 'path' => $job->source_r2_path]);
             $r2->download($job->source_r2_path, $sourceFile);
 
-            $outputR2Path = $job->isWatermark()
+            [$outputR2Path, $videoInfo] = $job->isWatermark()
                 ? $this->handleWatermark($job, $r2, $tempDir, $sourceFile)
                 : $this->handleConversion($job, $r2, $tempDir, $sourceFile);
 
-            $job->markCompleted($outputR2Path);
+            $job->markCompleted($outputR2Path, $videoInfo['width'], $videoInfo['height'], $videoInfo['codec']);
             Log::info('Job completed', ['uuid' => $job->uuid, 'output' => $outputR2Path]);
         } catch (\Throwable $e) {
             Log::error('Job failed', ['uuid' => $job->uuid, 'error' => $e->getMessage()]);
@@ -64,7 +64,7 @@ class ProcessVideoConversion implements ShouldQueue
 
     // ── Handlers ─────────────────────────────────────────────────────────────
 
-    private function handleConversion(ConversionJob $job, R2StorageService $r2, $tempDir, string $sourceFile): string
+    private function handleConversion(ConversionJob $job, R2StorageService $r2, $tempDir, string $sourceFile): array
     {
         $outputFilename = $this->buildOutputFilename($job);
         $outputFile     = $tempDir->path($outputFilename);
@@ -72,15 +72,16 @@ class ProcessVideoConversion implements ShouldQueue
         Log::info('Starting FFmpeg conversion', ['uuid' => $job->uuid, 'target' => $job->target_quality]);
         $this->convert($sourceFile, $outputFile, $job->target_quality);
 
+        $videoInfo    = $this->probeVideo($outputFile);
         $outputR2Path = rtrim($job->destination_folder, '/') . '/' . $outputFilename;
 
         Log::info('Uploading to private R2', ['uuid' => $job->uuid, 'path' => $outputR2Path]);
         $r2->upload($outputFile, $outputR2Path, R2StorageService::DISK_PRIVATE);
 
-        return $outputR2Path;
+        return [$outputR2Path, $videoInfo];
     }
 
-    private function handleWatermark(ConversionJob $job, R2StorageService $r2, $tempDir, string $sourceFile): string
+    private function handleWatermark(ConversionJob $job, R2StorageService $r2, $tempDir, string $sourceFile): array
     {
         $watermarkFile = public_path(self::WATERMARK_IMAGE);
 
@@ -94,13 +95,14 @@ class ProcessVideoConversion implements ShouldQueue
         Log::info('Starting FFmpeg watermark conversion', ['uuid' => $job->uuid]);
         $this->convertWithWatermark($sourceFile, $outputFile, $watermarkFile);
 
+        $videoInfo    = $this->probeVideo($outputFile);
         $folder       = rtrim($job->watermark_folder ?: $job->destination_folder, '/');
         $outputR2Path = $folder . '/' . $outputFilename;
 
         Log::info('Uploading watermarked video to public R2', ['uuid' => $job->uuid, 'path' => $outputR2Path]);
         $r2->upload($outputFile, $outputR2Path, R2StorageService::DISK_PUBLIC);
 
-        return $outputR2Path;
+        return [$outputR2Path, $videoInfo];
     }
 
     // ── FFmpeg ────────────────────────────────────────────────────────────────
@@ -200,6 +202,34 @@ class ProcessVideoConversion implements ShouldQueue
             'HD'    => [1080, 8000],
             default => throw new \InvalidArgumentException("Unsupported target quality: {$quality}"),
         };
+    }
+
+    private function probeVideo(string $filePath): array
+    {
+        $command = [
+            config('laravel-ffmpeg.ffprobe.binaries', 'ffprobe'),
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_streams',
+            '-select_streams', 'v:0',
+            $filePath,
+        ];
+
+        $process = new Process($command);
+        $process->setTimeout(30);
+        $process->run();
+
+        if (!$process->isSuccessful()) {
+            return ['width' => null, 'height' => null, 'codec' => null];
+        }
+
+        $stream = json_decode($process->getOutput(), true)['streams'][0] ?? [];
+
+        return [
+            'width'  => isset($stream['width'])  ? (int) $stream['width']  : null,
+            'height' => isset($stream['height']) ? (int) $stream['height'] : null,
+            'codec'  => $stream['codec_name'] ?? null,
+        ];
     }
 
     private function buildOutputFilename(ConversionJob $job): string
